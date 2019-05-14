@@ -52,6 +52,9 @@
  * running the ASF driver selector tool. Any changes will be discarded.
  */
 
+// From module: AFEC - Analog-Front-End Controller
+#include <afec.h>
+
 // From module: Common SAM compiler driver
 #include <compiler.h>
 #include <status_codes.h>
@@ -99,6 +102,9 @@
 #include <pmc.h>
 #include <sleep.h>
 
+// From module: PWM - Pulse Width Modulation
+#include <pwm.h>
+
 // From module: Part identification macros
 #include <parts.h>
 
@@ -114,6 +120,10 @@
 
 // From module: SPI - Serial Peripheral Interface
 #include <spi.h>
+
+// From module: Sleep manager - SAM implementation
+#include <sam/sleepmgr.h>
+#include <sleepmgr.h>
 
 // From module: Standard serial I/O (stdio) - SAM implementation
 #include <stdio_serial.h>

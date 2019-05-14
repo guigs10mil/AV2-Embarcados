@@ -122,6 +122,18 @@ const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
 
 #define padding                        20
 
+// Bot?o1
+#define BUT1_PIO      PIOD
+#define BUT1_PIO_ID   16
+#define BUT1_IDX  28
+#define BUT1_IDX_MASK (1 << BUT1_IDX)
+
+// Bot?o2
+#define BUT2_PIO      PIOC
+#define BUT2_PIO_ID   12
+#define BUT2_IDX  31
+#define BUT2_IDX_MASK (1 << BUT2_IDX)
+
 #define PIO_PWM_0 PIOA
 #define ID_PIO_PWM_0 ID_PIOA
 #define MASK_PIN_PWM_0 (1 << 0)
@@ -145,9 +157,8 @@ QueueHandle_t xQueueTouch;
 QueueHandle_t xQueueTemp;
 QueueHandle_t xQueuePWM;
 
-SemaphoreHandle_t xSemaphoreDrawTemp;
-
-volatile uint32_t temp_value = 0;
+SemaphoreHandle_t xSemaphoreIncrease;
+SemaphoreHandle_t xSemaphoreDecrease;
 
 /************************************************************************/
 /* RTOS hooks                                                           */
@@ -242,6 +253,36 @@ void PWM0_init(uint channel, uint duty){
 	
 	/* Enable PWM channels for LEDs */
 	pwm_channel_enable(PWM0, channel);
+}
+
+void but1_callback(void)
+{
+	xSemaphoreGiveFromISR(xSemaphoreIncrease, 0);
+}
+
+void but2_callback(void)
+{
+	xSemaphoreGiveFromISR(xSemaphoreDecrease, 0);
+}
+
+void io_init(void)
+{
+	pmc_enable_periph_clk(BUT1_PIO_ID);
+	pmc_enable_periph_clk(BUT2_PIO_ID);
+
+	pio_configure(BUT1_PIO, PIO_INPUT, BUT1_IDX_MASK, PIO_PULLUP | PIO_DEBOUNCE);
+	pio_configure(BUT2_PIO, PIO_INPUT, BUT2_IDX_MASK, PIO_PULLUP | PIO_DEBOUNCE);
+
+	pio_handler_set(BUT1_PIO, BUT1_PIO_ID, BUT1_IDX_MASK, PIO_IT_RISE_EDGE, but1_callback);
+	pio_handler_set(BUT2_PIO, BUT2_PIO_ID, BUT2_IDX_MASK, PIO_IT_FALL_EDGE, but2_callback);
+
+	pio_enable_interrupt(BUT1_PIO, BUT1_IDX_MASK);
+	pio_enable_interrupt(BUT2_PIO, BUT2_IDX_MASK);
+
+	NVIC_EnableIRQ(BUT1_PIO_ID);
+	NVIC_SetPriority(BUT1_PIO_ID, 4);
+	NVIC_EnableIRQ(BUT2_PIO_ID);
+	NVIC_SetPriority(BUT2_PIO_ID, 4);
 }
 
 /**
@@ -361,20 +402,24 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 	}
 }
 
-void draw_button(uint32_t clicked) {
-	static uint32_t last_state = 255; // undefined
-	if(clicked == last_state) return;
+void draw_temp_graphics(uint32_t level) {
+	uint x = padding;
+	uint y = ILI9488_LCD_HEIGHT/2 + padding;
+	ili9488_draw_pixmap(x, y, termometro.width, termometro.height+2, termometro.data);
 	
-	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_BLACK));
-	ili9488_draw_filled_rectangle(BUTTON_X-BUTTON_W/2, BUTTON_Y-BUTTON_H/2, BUTTON_X+BUTTON_W/2, BUTTON_Y+BUTTON_H/2);
-	if(clicked) {
-		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_TOMATO));
-		ili9488_draw_filled_rectangle(BUTTON_X-BUTTON_W/2+BUTTON_BORDER, BUTTON_Y+BUTTON_BORDER, BUTTON_X+BUTTON_W/2-BUTTON_BORDER, BUTTON_Y+BUTTON_H/2-BUTTON_BORDER);
-	} else {
-		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_GREEN));
-		ili9488_draw_filled_rectangle(BUTTON_X-BUTTON_W/2+BUTTON_BORDER, BUTTON_Y-BUTTON_H/2+BUTTON_BORDER, BUTTON_X+BUTTON_W/2-BUTTON_BORDER, BUTTON_Y-BUTTON_BORDER);
+	y += 9;
+	uint y2 = y;
+	
+	if (level <= 0) {
+		y2 += termometro.height - 42;
 	}
-	last_state = clicked;
+	if (level == 1) {
+		y2 += termometro.height - 61;
+	}
+	
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+	ili9488_draw_filled_rectangle(x+13, y, x+20, y2);
+	
 }
 
 void draw_initial_layout(void) {
@@ -392,10 +437,15 @@ void draw_initial_layout(void) {
 	font_draw_text(&digital52, "100%", 2 * padding + ar.width, ILI9488_LCD_HEIGHT/2 + padding + 10 + termometro.height+2 + padding, 1);
 }
 
-void draw_temp(uint32_t temp) {
+void draw_temp(uint32_t temp, uint alvo) {
 	char buf[100];
-	sprintf(buf, "%4d", temp);
-	font_draw_text(&digital52, buf, 2 * padding + termometro.width, ILI9488_LCD_HEIGHT/2 + padding + 10, 1);
+	sprintf(buf, "%3d", temp);
+	int x_value = 2 * padding + termometro.width;
+	if (alvo) x_value += 2 * padding + termometro.width;
+	font_draw_text(&digital52, buf, x_value, ILI9488_LCD_HEIGHT/2 + padding + 10, 1);
+	if (temp < 25) draw_temp_graphics(0);
+	else if (temp < 50) draw_temp_graphics(1);
+	else draw_temp_graphics(2);
 }
 
 void draw_pwm(uint32_t pwm) {
@@ -406,7 +456,7 @@ void draw_pwm(uint32_t pwm) {
 
 static void AFEC_Temp_callback(void)
 {
-	temp_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_0);
+	uint32_t temp_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_0);
 	xQueueSendFromISR( xQueueTemp, &temp_value, 0);
 }
 
@@ -535,23 +585,45 @@ void task_mxt(void){
 void task_lcd(void){
 	xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
 	xQueueTemp = xQueueCreate( 10, sizeof( uint32_t ) );
-	xQueuePWM = xQueueCreate( 10, sizeof( uint32_t ) );
+	xSemaphoreDecrease = xSemaphoreCreateBinary();
+	xSemaphoreIncrease = xSemaphoreCreateBinary();
 	
 	configure_lcd();
+	
+	io_init();
   
 	draw_initial_layout();
 	touchData touch;
   
-	uint32_t temp = 0;
+	uint32_t temp = 25;
+	uint32_t temp_alvo = 25;
+	
 	uint duty = 0;
     
 	while (true) {  
-		if (xQueueReceive( xQueueTemp, &(temp), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
-			draw_temp((temp-24) * 100 / 4050);
+		if (xQueueReceive( xQueueTemp, &(temp), ( TickType_t )  10 / portTICK_PERIOD_MS)) {
+			temp = (temp-24) * 100 / 4050; // conversao para graus celsius
+			if (temp < 101) draw_temp(temp, 0);
+			
+			if (temp > temp_alvo) {
+				duty = (temp - temp_alvo) * 100 / (100 - temp_alvo); // potencia do ar proporcional a diferenca de temperatura entre a temp atual e a alvo
+			}
+			else duty = 0;
+			
+			if (duty < 101) draw_pwm(duty);
+			
+			xQueueSend(xQueuePWM, &duty, 0);
 		}
-		if (xQueueReceive( xQueuePWM, &(duty), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
-			draw_pwm(duty);
+		
+		if (xSemaphoreTake(xSemaphoreIncrease, ( TickType_t )  10 / portTICK_PERIOD_MS)) {
+			temp_alvo += 1;
+			draw_temp(temp_alvo, 1);
 		}
+		if (xSemaphoreTake(xSemaphoreDecrease, ( TickType_t )  10 / portTICK_PERIOD_MS)) {
+			temp_alvo -= 1;
+			draw_temp(temp_alvo, 1);
+		}
+		
 // 		if (xQueueReceive( xQueueTouch, &(touch), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
 // 			update_screen(touch.x, touch.y);
 // 			printf("x:%d y:%d\n", touch.x, touch.y);
@@ -565,8 +637,6 @@ void task_afec(void){
 
 	config_ADC_TEMP();
 	
-	afec_start_software_conversion(AFEC0);
-	
 	while (true) {
 		afec_start_software_conversion(AFEC0);
 		vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -574,6 +644,7 @@ void task_afec(void){
 }
 
 void task_pwm(void){
+	xQueuePWM = xQueueCreate( 10, sizeof( uint32_t ) );
 	
 	pmc_enable_periph_clk(ID_PIO_PWM_0);
 	pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_A, MASK_PIN_PWM_0 );
@@ -582,9 +653,9 @@ void task_pwm(void){
 	PWM0_init(0, duty);
 
 	while (1) {
-		pwm_channel_update_duty(PWM0, &g_pwm_channel_led, 100-duty);
-		xQueueSend(xQueuePWM, &duty, 0);
-		vTaskDelay(100 / portTICK_PERIOD_MS);
+		if (xQueueReceive( xQueuePWM, &(duty), ( TickType_t )  100 / portTICK_PERIOD_MS)) {
+			pwm_channel_update_duty(PWM0, &g_pwm_channel_led, 100-duty);
+		}
 	}
 }
 

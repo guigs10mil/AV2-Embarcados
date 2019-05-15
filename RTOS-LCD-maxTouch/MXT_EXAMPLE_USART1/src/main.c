@@ -402,23 +402,21 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 	}
 }
 
-void draw_temp_graphics(uint32_t level) {
+void draw_temp_graphics(uint32_t temp) {
 	uint x = padding;
 	uint y = ILI9488_LCD_HEIGHT/2 + padding;
-	ili9488_draw_pixmap(x, y, termometro.width, termometro.height+2, termometro.data);
 	
-	y += 9;
-	uint y2 = y;
-	
-	if (level <= 0) {
-		y2 += termometro.height - 42;
-	}
-	if (level == 1) {
-		y2 += termometro.height - 61;
-	}
+	uint xmin = padding+14;
+	uint xmax = padding+19;
+	uint ymin = y + 9;
+	uint ymax = y + termometro.height - 33;
+
+	uint ytemp = ((100 - temp) * (termometro.height - 42) / 100) + y + 9;
 	
 	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
-	ili9488_draw_filled_rectangle(x+13, y, x+20, y2);
+	ili9488_draw_filled_rectangle(xmin, ymin, xmax, ytemp);
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_BLACK));
+	ili9488_draw_filled_rectangle(xmin, ytemp, xmax, ymax);
 	
 }
 
@@ -442,10 +440,8 @@ void draw_temp(uint32_t temp, uint alvo) {
 	sprintf(buf, "%3d", temp);
 	int x_value = 2 * padding + termometro.width;
 	if (alvo) x_value += 2 * padding + termometro.width;
+	else draw_temp_graphics(temp);
 	font_draw_text(&digital52, buf, x_value, ILI9488_LCD_HEIGHT/2 + padding + 10, 1);
-	if (temp < 25) draw_temp_graphics(0);
-	else if (temp < 50) draw_temp_graphics(1);
-	else draw_temp_graphics(2);
 }
 
 void draw_pwm(uint32_t pwm) {

@@ -105,11 +105,6 @@
 #define MAX_ENTRIES        3
 
 struct ili9488_opt_t g_ili9488_display_opt;
-const uint32_t BUTTON_W = 120;
-const uint32_t BUTTON_H = 150;
-const uint32_t BUTTON_BORDER = 2;
-const uint32_t BUTTON_X = ILI9488_LCD_WIDTH/2;
-const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
 	
 /************************************************************************/
 /* RTOS                                                                  */
@@ -159,6 +154,7 @@ QueueHandle_t xQueuePWM;
 
 SemaphoreHandle_t xSemaphoreIncrease;
 SemaphoreHandle_t xSemaphoreDecrease;
+SemaphoreHandle_t xSemaphoreTime;
 
 /************************************************************************/
 /* RTOS hooks                                                           */
@@ -253,6 +249,64 @@ void PWM0_init(uint channel, uint duty){
 	
 	/* Enable PWM channels for LEDs */
 	pwm_channel_enable(PWM0, channel);
+}
+
+void RTC_init(){
+	/* Configura o PMC */
+	pmc_enable_periph_clk(ID_RTC);
+
+	/* Default RTC configuration, 24-hour mode */
+	rtc_set_hour_mode(RTC, 0);
+
+	/* Configura data e hora manualmente */
+	rtc_set_date(RTC, 0, 0, 0, 0);
+	rtc_set_time(RTC, 0, 0, 0);
+
+	/* Configure RTC interrupts */
+	NVIC_DisableIRQ(RTC_IRQn);
+	NVIC_ClearPendingIRQ(RTC_IRQn);
+	NVIC_SetPriority(RTC_IRQn, 5);
+	NVIC_EnableIRQ(RTC_IRQn);
+
+	/* Ativa interrupcao via alarme */
+	rtc_enable_interrupt(RTC, RTC_IER_ALREN);
+	
+	rtc_set_date_alarm(RTC, 1, 0, 1, 0);
+	rtc_set_time_alarm(RTC, 1, 0, 1, 0, 1, 1);
+
+}
+
+void RTC_Handler(void)
+{
+	uint32_t ul_status = rtc_get_status(RTC);
+
+	if ((ul_status & RTC_SR_SEC) == RTC_SR_SEC) {
+		rtc_clear_status(RTC, RTC_SCCR_SECCLR);
+	}
+
+	if ((ul_status & RTC_SR_ALARM) == RTC_SR_ALARM) {
+		rtc_clear_status(RTC, RTC_SCCR_ALRCLR);
+		rtc_set_date_alarm(RTC, 1, 0, 1, 0);
+		int hora, min, sec;
+		rtc_get_time(RTC, &hora, &min, &sec);
+		if (sec >= 59) {
+			if (min >= 59) {
+				rtc_set_time_alarm(RTC, 1, 0, hora+1, 0, 1, 0);
+			} else {
+				rtc_set_time_alarm(RTC, 1, hora, 1, min+1, 1, 0);
+			}
+		} else {
+			rtc_set_time_alarm(RTC, 1, hora, 1, min, 1, sec+1);
+		}
+		
+		xSemaphoreGiveFromISR(xSemaphoreTime, 0);
+	}
+	
+	rtc_clear_status(RTC, RTC_SCCR_ACKCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TIMCLR);
+	rtc_clear_status(RTC, RTC_SCCR_CALCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TDERRCLR);
+	
 }
 
 void but1_callback(void)
@@ -423,7 +477,7 @@ void draw_temp_graphics(uint32_t temp) {
 void draw_initial_layout(void) {
 	draw_screen();
 	
-	font_draw_text(&digital52, "HH:MM", padding, ILI9488_LCD_HEIGHT/4 - 26, 1);
+	font_draw_text(&digital52, "HH:MM:SS", padding, ILI9488_LCD_HEIGHT/4 - 26, 1);
 	ili9488_draw_pixmap(ILI9488_LCD_WIDTH - soneca.width - padding, padding, soneca.width, soneca.height+2, soneca.data);
 	ili9488_draw_pixmap(padding, ILI9488_LCD_HEIGHT/2 + padding, termometro.width, termometro.height+2, termometro.data);
 	ili9488_draw_pixmap(padding, ILI9488_LCD_HEIGHT/2 + padding + termometro.height+2 + padding, ar.width, ar.height+2, ar.data);
@@ -448,6 +502,12 @@ void draw_pwm(uint32_t pwm) {
 	char buf[100];
 	sprintf(buf, "%3d", pwm);
 	font_draw_text(&digital52, buf, 2 * padding + ar.width, ILI9488_LCD_HEIGHT/2 + padding + 10 + termometro.height+2 + padding, 1);
+}
+
+void draw_time(uint32_t seconds) {
+	char buf[100];
+	sprintf(buf, "%02d:%02d:%02d", seconds/3600, (seconds%3600)/60, seconds%60);
+	font_draw_text(&digital52, buf, padding, ILI9488_LCD_HEIGHT/4 - 26, 1);
 }
 
 static void AFEC_Temp_callback(void)
@@ -514,13 +574,6 @@ uint32_t convert_axis_system_y(uint32_t touch_x) {
 }
 
 void update_screen(uint32_t tx, uint32_t ty) {
-// 	if(tx >= BUTTON_X-BUTTON_W/2 && tx <= BUTTON_X + BUTTON_W/2) {
-// 		if(ty >= BUTTON_Y-BUTTON_H/2 && ty <= BUTTON_Y) {
-// 			draw_button(1);
-// 		} else if(ty > BUTTON_Y && ty < BUTTON_Y + BUTTON_H/2) {
-// 			draw_button(0);
-// 		}
-// 	}
 }
 
 void mxt_handler(struct mxt_device *device, uint *x, uint *y)
@@ -581,12 +634,15 @@ void task_mxt(void){
 void task_lcd(void){
 	xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
 	xQueueTemp = xQueueCreate( 10, sizeof( uint32_t ) );
+	xSemaphoreTime = xSemaphoreCreateBinary();
 	xSemaphoreDecrease = xSemaphoreCreateBinary();
 	xSemaphoreIncrease = xSemaphoreCreateBinary();
 	
 	configure_lcd();
 	
 	io_init();
+	
+	RTC_init();
   
 	draw_initial_layout();
 	touchData touch;
@@ -595,6 +651,8 @@ void task_lcd(void){
 	uint32_t temp_alvo = 25;
 	
 	uint duty = 0;
+	
+	uint32_t seconds = 0;
     
 	while (true) {  
 		if (xQueueReceive( xQueueTemp, &(temp), ( TickType_t )  10 / portTICK_PERIOD_MS)) {
@@ -609,6 +667,11 @@ void task_lcd(void){
 			if (duty < 101) draw_pwm(duty);
 			
 			xQueueSend(xQueuePWM, &duty, 0);
+		}
+		
+		if (xSemaphoreTake(xSemaphoreTime, ( TickType_t )  10 / portTICK_PERIOD_MS)) {
+			seconds += 1;
+			draw_time(seconds);
 		}
 		
 		if (xSemaphoreTake(xSemaphoreIncrease, ( TickType_t )  10 / portTICK_PERIOD_MS)) {
